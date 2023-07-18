@@ -1,0 +1,268 @@
+---
+title: "Data_import"
+format: html
+editor: visual
+---
+
+# Big data in R
+
+There are different ways of accessing your data for your machine learning, visualization or even munging in an R environment.\
+I'll look into a case in point for data access for a shiny application. Shiny is an R library used to create web applications from R. A shiny app basically has two components, the user interface (mostly known as the front-end) and then the server logic (back-end). The user interface is where the visualizations are displayed and the server logic is where you write the code that generates the graphics/visualizations shown on the user interface.\
+To have a shiny app display your visualizations, you'll need to have some form of data which generates the graphics, this data can be obtained in a number of ways. If its a simple app you can actually generate the data on the fly on the server logic and other ways of accessing the data are;
+
+-   file formats such csv, txt, json, parquet e.t.c file store locally
+-   url (link to a csv on a webpage)
+-   Database (both locally and remotely)
+-   Database file (SQLite kind of databases)
+
+This approaches differ in a number of ways in terms of amount of data, performance and other factors of which the choice of approach really depends on your use case.
+
+Shiny apps have one drawback which is a pain point to dashboard developers, they can be really slow especially when the dashboard is complex or big in size and this often times leads the developers into seeking for ways to optimize the performance of the dashboards. Now, let's talk about one of the ways of optimizing the performance of shiny dashboards - data access, I mean, how do you bring your data into R and which one works best in terms of performance.
+
+Let's now bench mark the different ways of fetching your data into R and look at how they compare in regards to performance.
+
+The question we're seeking to answer in this article is how can you optimize the performance of your shiny dashboard?\
+To answer that we'll start by looking at how the different functions you use for data import compare.
+
+First of all let's create some dummy data using *fakir* package. We'll generate a csv file with one million records and store it as a csv file.
+
+```{r}
+
+# library(fakir)
+# products <- fake_products(1000000)
+# write.csv(products,"products.csv")
+
+```
+
+Use benchmark to compare time differences
+
+fread vs read.csv
+
+csv files are; human readable can be used in most languages
+
+However, The eat up too much space on the disk when the data is large Analyzing huge data stored in csv format can be an uphill task or even impossible given that the data has to be all loaded into memory for you to do the analysis. If you have 30gb csv data and your RAM is just 8gb then you know you're in trouble!
+
+```{r}
+
+library(rbenchmark)
+library(data.table)
+library(readr)
+library(data.table)
+library(RSQLite)
+library(DBI)
+library(dplyr)
+library(dbplyr)
+
+benchmark("fread" = {
+           dt_products <- fread("products.csv")
+          
+          },
+          "readcsv" = {
+           utils_products <- read.csv("products.csv")
+            
+          },
+          "read_csv" = {
+           readr_products <- read_csv("products.csv")
+          
+          },
+          replications = 10,
+          columns = c("test", "replications", "elapsed",
+                      "relative", "user.self", "sys.self"))  
+
+```
+
+fread vs dbReadTable
+### SQLite
+
+```{r}
+benchmark("prod_csv" = {
+            prod_table <- fread("products.csv")
+            china_csv <- prod_table[sent_from=="China",]
+          },
+          "prod_db" = {
+            con_prod <- dbConnect(SQLite(), "products_db.db")
+           china_db <- dbGetQuery(con_prod,"select * from products where sent_from='China';")
+          },
+          replications = 100,
+          columns = c("test", "replications", "elapsed",
+                      "relative", "user.self", "sys.self"))
+```
+
+fread vs parquet files    
+
+### Arrow
+Apache arrow C++ library provides wonderful features for working with columnar data i.e dataframes. The *arrow* package in R provides functions that enable you to tap into the library's potential without necessarily having to know C++. The arrow library has a functionality for dplyr which can be used to manipulate and explore arrow datasets.  
+Arrow has two amazing features;   
+
+* filter push down. So this technique works in such a way that when subsetting data which cannot fit into memory, the filtering is pushed down to the data file and only the resulting subset is returned, as such, you don't have to load the whole dataset into memory.   
+
+* Partition. Data can be partitioned on a column of your choice into smaller files. For example, let's say your data has a location column, partitioning on such a column will result to say a file for County A, County B e.t.c. What then happens is, when filtering the files which do not correspond to the filter condition will be ignored hence won't need to be loaded to memory in-order to check if there are records which confirm to the condition. However, the efficiency of this feature depends on other factors such as file size, it works best for files not less than 20mb and not larger than 2gb.
+
+Store the products table as a parquet file. 
+Let's create a parquet file using arrow's *write_parquet* function.
+
+```{r}
+library(arrow)
+write_parquet(prod_table,"prod.parquet")
+```
+
+Compare the read speed of parquet files and the other approaches.
+
+```{r}
+
+benchmark("prod_csv" = {
+            prod_csv_table <- read.csv("products.csv")
+            china_csv <- dplyr::filter(prod_csv_table,sent_from=="China")
+          },
+          "prod_par" = {
+            prod_parquet <- read_parquet(file = "prod.parquet")
+            china_par <- prod_parquet[sent_from=="China",]
+          },
+          "prod_dt" = {
+            prod_dt_table <- fread("products.csv")
+            china_dt <- prod_dt_table[sent_from=="China",]
+          },
+          "prod_db" = {
+            con_prod <- dbConnect(SQLite(), "products_db.db")
+            #prod_table_db <- dbReadTable(con_prod,"products")
+            china_db <- dbGetQuery(con_prod,"select * from products where sent_from='China';")
+          },
+          "prod_db_indexed" = {
+           consqlite_prod_indexed <- dbConnect(SQLite(), "products.db")
+           china_db_indexed <- dbGetQuery(consqlite_prod_indexed,"select * from products where sent_from='China';")
+          },
+          replications = 100,
+          columns = c("test", "replications", "elapsed",
+                      "relative", "user.self", "sys.self"))
+
+```
+
+### Duckdb
+
+Duckdb is an embeddable relational database management system (like SQLite) popularly known as "SQLite for analytics" owing to it's design to execute analytical SQL queries while being embedded in another process. It stores data in a compressed columnar format, as such, it provides the best performance for large-scale aggregations. It also has a vectorized query engine which allows simultaneous analysis of small batches of data.
+
+Gains of using Duckdb    
+* Ease of use   
+* Portability     
+* Super fast performance    
+
+```{r}
+library(duckdb)
+
+con_duck <- dbConnect(duckdb(),dbdir="products.duckdb",read_only=FALSE) 
+dbWriteTable(con_duck,"products",readr_products)
+
+```
+
+Compare
+
+```{r}
+benchmark("prod_csv" = {
+            prod_csv_table <- read.csv("products.csv")
+            china_csv <- dplyr::filter(prod_csv_table,sent_from=="China")
+          },
+          "prod_par" = {
+            prod_parquet <- read_parquet(file = "prod.parquet")
+            china_par <- prod_parquet[sent_from=="China",]
+          },
+          "prod_dt" = {
+            prod_dt_table <- fread("products.csv")
+            china_dt <- prod_dt_table[sent_from=="China",]
+          },
+          "prod_sqlitedb" = {
+            con_prod <- dbConnect(SQLite(), "products_db.db")
+            #prod_table_db <- dbReadTable(con_prod,"products")
+            china_db <- dbGetQuery(con_prod,"select * from products where sent_from='China';")
+          },
+          "prod_sqlitedb_indexed" = {
+           consqlite_prod_indexed <- dbConnect(SQLite(), "products.db")
+           china_db_indexed <- dbGetQuery(consqlite_prod_indexed,"select * from products where sent_from='China';")
+          },
+          "prod_duckdb" = {
+           conduckdb_prod <- dbConnect(duckdb(), "products.duckdb")
+           china_duckdb <- dbGetQuery(conduckdb_prod,"select * from products where sent_from='China';")
+          },
+          replications = 100,
+          columns = c("test", "replications", "elapsed",
+                      "relative", "user.self", "sys.self"))
+```
+
+### Duck db and arrow
+
+One of the amazing features of Duckdb is the provision to run SQL queries with other processes, one of them being Arrow. With Duckdb one can send SQL queries to Arrow datasets directly and stream the results back to Arrow using DuckDB's SQL interface and API. This combination is such a marvel, talk of power!. The combination of Arrow's predicate and filter pushdown while scanning datasets and DuckDB's parallel vectorized execution engine produces quite some significance performance gains;
+
+-   Perform larger than memory analysis: Let's say your laptop has 8gb memory and you want to analyze data that is 20gb, this is impossible if you want to approach traditionally, however, the combination of DuckDB and Arrow makes it possible owing to the fact that both libraries make it possible to execute on the data without having to load all of it to memory.
+-   Faster data access/manipulation: Seeing that Arrow makes it possible to partition data and DuckDB can leverage Arrow's filter push-down feature, the execution of queries is super fast.
+
+```{r}
+
+benchmark("prod_csv" = {
+            prod_csv_table <- read.csv("products.csv")
+            china_csv <- dplyr::filter(prod_csv_table,sent_from=="China")
+          },
+          "prod_par" = {
+            prodparquet <- read_parquet(file = "prod.parquet", as_data_frame = FALSE)
+            china_par <- dplyr::filter(prodparquet, sent_from=="China")
+          },
+          "prod_dt" = {
+            prod_dt_table <- fread("products.csv")
+            china_dt <- prod_dt_table[sent_from=="China",]
+          },
+          "prod_sqlitedb" = {
+            con_prod <- dbConnect(SQLite(), "products_db.db")
+            china_db <- dbGetQuery(con_prod,"select * from products where sent_from='China';")
+            dbDisconnect(con_prod)
+          },
+          "prod_sqlitedb_indexed" = {
+           consqlite_prod_indexed <- dbConnect(SQLite(), "products.db")
+           china_db_indexed <- dbGetQuery(consqlite_prod_indexed,"select * from products where sent_from='China';")
+           dbDisconnect(consqlite_prod_indexed)
+          },
+          "prod_duckdb" = {
+           conduckdb_prod <- dbConnect(duckdb(), "products.duckdb")
+           china_duckdb <- dbGetQuery(conduckdb_prod,"select * from products where sent_from='China';")
+           dbDisconnect(conduckdb_prod)
+          },
+          "prod_arrow_duckdb" = {
+            
+            prod_arrow_table <- arrow::read_parquet(file="prod.parquet", as_data_frame = FALSE)
+            
+            con_arrow <- dbConnect(duckdb::duckdb())
+            
+            
+            china_arrddb <- prod_arrow_table %>% 
+              to_duckdb(con =  con_arrow) %>%
+              filter(sent_from=="China") %>% 
+              collect()
+            
+            dbDisconnect(con_arrow)
+           
+          # # Reads Parquet File to an Arrow Table
+          #   prod_arrow_table <- arrow::read_parquet(file="prod.parquet", as_data_frame = FALSE)
+          #   
+          #   # Gets Database Connection
+          #   con_arrow <- dbConnect(duckdb::duckdb())
+          #   
+          #   # Registers arrow table as a DuckDB view
+          #   arrow::to_duckdb(prod_arrow_table, table_name = "prod_arrow_table", con = con_arrow)
+          #   
+          #   # we can run a SQL query on this and print the result
+          #   china_arrow_duckdb <- dbGetQuery(con_arrow, "select * from prod_arrow_table where sent_from='China';")
+          #   
+          #   dbDisconnect(con_arrow)       
+          },
+          "prod_duckdb_sql_parq" = {
+           con_ddb_parq_sql <- dbConnect(duckdb::duckdb())
+           china_duckdb_sql_parq <-  dbGetQuery(con_ddb_parq_sql, "select * from read_parquet('prod.parquet') where sent_from='China';")
+              dbDisconnect(con_ddb_parq_sql)
+          },
+          
+          replications = 10,
+          columns = c("test", "replications", "elapsed",
+                      "relative", "user.self", "sys.self"))
+
+
+
+```
+
+References 1. https://duckdb.org/2021/12/03/duck-arrow.html 2. https://arrow.apache.org/docs/r/articles/arrow.html
